@@ -1,0 +1,10 @@
+[package]
+name = "chat"
+version = "0.1.0"
+authors = ["seb-odessa <seb@ukr.net>"]
+
+[dependencies]
+mio = "*"
+syslog = "*"
+
+
