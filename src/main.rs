@@ -226,9 +226,7 @@ impl Handler for WebSocketServer{
 
 fn main() {
     LoggerFacade::init().unwrap();
-    info!("Started...{},{}",1,2);
-    warn!("Warning");
-    error!("Error!!!");
+    info!("Started...");
     let mut event_loop = EventLoop::new().unwrap();
     let mut server = WebSocketServer::new();
 
