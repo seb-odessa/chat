@@ -8,4 +8,5 @@ mio = "*"
 log = "*"
 syslog = "*"
 http-muncher = "*"
-
+rustc-serialize = "*"
+sha1 = "*"
