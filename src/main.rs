@@ -1,49 +1,104 @@
 
 extern crate mio;
+extern crate http_muncher;
+
+#[macro_use]
+extern crate log;
 extern crate syslog;
+
+
+use http_muncher::{Parser, ParserHandler};
 
 use std::net::SocketAddr;
 use mio::tcp::*;
 use mio::*;
-use syslog::{Facility,Severity};
 use std::collections::HashMap;
 
-struct Logger {
+
+use log::{LogRecord, LogLevel, LogMetadata};
+
+struct LoggerFacade
+{
     log : Box<syslog::Logger>
 }
-impl Logger {
-    fn new() -> Logger{
-        let log = match syslog::unix(Facility::LOG_USER) {
-            Err(e)  => panic!("Impossible to connect to syslog: {:?}", e),
-            Ok(log) => log
+impl LoggerFacade {
+    pub fn init() -> Result<(), log::SetLoggerError> {
+        let syslog = match syslog::unix(syslog::Facility::LOG_USER) {
+            Ok(log) => log,
+            Err(e) => panic!("Can't attach to SYSLOG {}", e)
         };
-        let logger = Logger { log : log };
-        logger.info("Logger created successful.");
-        return logger;
-    }
-
-    fn err<S: Into<String>>(&self, msg : S) {
-        self.log.send_3164(Severity::LOG_ERR, msg.into()).unwrap(); 
-    }
-
-    fn info<S: Into<String>>(&self, msg : S) {
-        self.log.send_3164(Severity::LOG_INFO, msg.into()).unwrap(); 
+        log::set_logger(|max_log_level| { 
+            max_log_level.set(log::LogLevelFilter::Info);
+            Box::new(LoggerFacade{log : syslog}) 
+        })
     }
 }
-impl Drop for Logger {
-    fn drop(&mut self) {
-        self.info("Logger destroyed.");
+impl log::Log for LoggerFacade {
+    fn enabled(&self, metadata: &LogMetadata) -> bool {
+        metadata.level() <= LogLevel::Info
+    }
+
+    fn log(&self, record: &LogRecord) {
+        if self.enabled(record.metadata()) {
+            self.log.send_3164(syslog::Severity::LOG_INFO, format!("{} - {}", record.level(), record.args())).unwrap();
+        }
     }
 }
+
+
+
+struct HttpParser;
+impl ParserHandler for HttpParser { }
+
 
 const SERVER_TOKEN: Token = Token(1);
+
+struct WebSocketClient{
+    socket: TcpStream,
+    http_parser: Parser<HttpParser>,
+}
+
+impl WebSocketClient{
+    fn read(&mut self) {
+        loop {
+            let mut buf = [0; 2048];
+            match self.socket.try_read(&mut buf) {
+                Err(e) => {
+                    error!("Error while reading socket: {:?}", e);
+                    return
+                },
+                Ok(None) =>
+                {
+                    info!("Client socket has no data");
+                    // Socket buffer has got no more bytes.
+                    break
+                }
+                Ok(Some(len)) => {
+                    info!("Has readed {} bytes", &len);
+                    self.http_parser.parse(&buf[0..len]);
+                    if self.http_parser.is_upgrade() {
+                        // ...
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn new(socket: TcpStream) -> WebSocketClient {
+        WebSocketClient {
+            socket: socket,
+            http_parser: Parser::request(HttpParser),
+        }
+    }
+}
+
 struct WebSocketServer {
     socket: TcpListener,
-    clients: HashMap<Token, TcpStream>,
-    token_counter: usize,
-    log : Logger,
+    clients: HashMap<Token, WebSocketClient>,
+    counter: usize,
 }
-impl WebSocketServer {
+impl WebSocketServer{
     pub fn new() -> Self {
         let server = TcpSocket::v4().unwrap();
         let address = "0.0.0.0:10000".parse::<SocketAddr>().unwrap();
@@ -52,46 +107,58 @@ impl WebSocketServer {
         WebSocketServer {
             socket : server,
             clients : HashMap::new(),
-            token_counter : 1,
-            log : Logger::new()
+            counter : 1,
         }
     }
 }
-impl Handler for WebSocketServer {
+impl Handler for WebSocketServer{
     type Timeout = usize;
     type Message = ();
-    fn ready(&mut self, event_loop: &mut EventLoop<WebSocketServer>, token: Token, events: EventSet)  {
-        self.log.info("WebSocketServer.ready(...): Invoked.");
+
+    fn ready(&mut self, event_loop: &mut EventLoop<WebSocketServer>, token: Token, _events: EventSet)  {
+        info!("WebSocketServer.ready(...): Invoked.");
         match token {
             SERVER_TOKEN => {
-                let client_socket = match self.socket.accept() {
+                let socket = match self.socket.accept() {
                     Err(e) => {
-                        self.log.err(format!("Accept error: {}", e));
+                        error!("Accept error: {}", e);
                         return;
                     },
-                    Ok(None) => unreachable!("Accept has returned 'None'"),
+                    Ok(None) => {
+                        error!("Ok(None) is not acceptable here.");
+                        unreachable!("Accept has returned 'None'");
+                    },
                     Ok(Some(sock)) => sock
                 };
                 
-                self.token_counter += 1;
-                let token = Token(self.token_counter);
-                self.clients.insert(token, client_socket);
-                event_loop.register_opt(&self.clients[&token], token, EventSet::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
+                self.counter += 1;
+                let token = Token(self.counter);
+                self.clients.insert(token, WebSocketClient::new(socket));
+                event_loop.register_opt(&self.clients[&token].socket, token, EventSet::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
             },
-            Token(_) => {
-            }
+            
+            token => {
+                let mut client = self.clients.get_mut(&token).unwrap();
+                client.read();
+                event_loop.reregister(&client.socket, token, EventSet::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
+            },          
         }
-        self.log.info("WebSocketServer.ready(...): Done.");
+        info!("WebSocketServer.ready(...): Done.");
     }
 }
 
 fn main() {
+    LoggerFacade::init().unwrap();
+    info!("Started...{},{}",1,2);
+    warn!("Warning");
+    error!("Error!!!");
     let mut event_loop = EventLoop::new().unwrap();
     let mut server = WebSocketServer::new();
 
     event_loop.register_opt(&server.socket,  SERVER_TOKEN, EventSet::readable(),   PollOpt::edge()).unwrap();
 
     event_loop.run(&mut server).unwrap();
+    info!("Done...");
 }
 
 

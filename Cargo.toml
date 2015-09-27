@@ -5,6 +5,7 @@ authors = ["seb-odessa <seb@ukr.net>"]
 
 [dependencies]
 mio = "*"
+log = "*"
 syslog = "*"
-
+http-muncher = "*"
 
